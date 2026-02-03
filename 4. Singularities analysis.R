@@ -4,64 +4,167 @@ library(cluster)
 library(vegan)
 library(ggplot2)
 library (ENMTools)
-
+library (ks)
 # abrimos los archivos necesarios para el analisis ---------------------------
 predict="D:/0. Tesis Doctoral/1. Resultados/4. Singularidad/1. Material needed/Presente_world_predict_all.tiff"
-areas_compared="D:/0. Tesis Doctoral/1. Resultados/2. Analisis de centros/2. Centros de diversidad y endemismos/A. Primer analisis/Richnes/spatial_RICHNESS_SET1.tif"
 
 
-# richness --------------------------------------------------------
-rich=rast(areas_compared)
-rich_vec <- as.polygons(rich >= 18, dissolve = TRUE, values=T)
-rich_vec <- disagg(rich_vec[rich_vec$spatial_RICHNESS_SET1==1])
-
-# Cortamos las predicciones de cada una de las especies en las areas identificadas ----------------------------
+# abrimos la prediccion de cada una de las especies --------------------------------------------------------
 predict=rast(predict)
-rich_vec$name=c(1,2,3,4)
-corte=crop(predict, rich_vec)
-corte=mask(corte, rich_vec)
-categorized=rasterize(rich_vec, corte, field="name") # raster categorizado por tipo de area
 
-# Sampleamos la cantidad de puntos necesarios para el analisis -----------------
-puntos=spatSample(rich_vec, size=100,  strata="name") # sacamos 100 puntos de cada area necesaria para el analisis
-value_suitability=extract(corte,puntos, ID=F) # estraemos los valores de suitabilidad de cada especie en los puntos
-
-grupo=puntos$name
-
-# extraigo la distancia ------------------------------------------------------
-suit_std <- decostand(value_suitability, method = "hellinger")
+# convierto los valores de la prediccion en datos de Hellinger ------------------------------------------------
 mat=values(predict)
 rs <- rowSums(mat, na.rm=TRUE)
 mat.h <- mat
 mat.h[rs > 0, ] <- sqrt(mat[rs > 0, ] / rs[rs > 0])
 mat.h[rs == 0, ] <- NA
-spp.h <- predict
+spp.h <- predict  # estamos guardando como spp.h los valiores convertidos de hellinger
 values(spp.h) <- mat.h
 
-# calculo el PCA de las capas ambientales ----------------------------------------
+# Calculo el PCA de los valores de hellinger y me quedo con 3 caras ------------------
+PCA_allv=ENMTools::raster.pca(spp.h, 5)
+# verifico el % de variacion explicado por cada una de las variables -----------
+prop_varianza <- PCA_allv$pca.object$sdev^2 / sum(PCA_allv$pca.object$sdev^2) # make the calculation of the variance
+informacion_pca<- data.frame("Standar Deviation"=PCA_allv$pca.object$sdev,"prop_variance"=prop_varianza, "variance_acumulate"=cumsum(prop_varianza)) # store the summary of the deviation
+# se trabajan con 5 ejes que ejemplifican toda la variacion existente con 5 es de 71.94% de la varianza
+
+# archivos para guardar y abrir mas adelante --------------------------------------
+writeRaster(spp.h, "D:/0. Tesis Doctoral/1. Resultados/4. Singularidad/2. Hellinger transformation/Species_Hellinger_raster2.tif", overwrite=T)
+writeRaster(PCA_allv$rasters, "D:/0. Tesis Doctoral/1. Resultados/4. Singularidad/2. Hellinger transformation/Species_PCA_raster.tif", overwrite=T)
+
+######################### SEGUNDA PARTE ####################################################
+# abrimos todos los archivos realizados ---------------------------------------------------------
+spp.h<-rast("D:/0. Tesis Doctoral/1. Resultados/4. Singularidad/2. Hellinger transformation/Species_Hellinger_raster.tif")
+PCA_allv=rast("D:/0. Tesis Doctoral/1. Resultados/4. Singularidad/2. Hellinger transformation/Species_PCA_raster.tif")
+
+# Para no colapsar la memoria seleccionamos 50000 grillas de todo el objeto de estudio------------
+samp <- spatSample(PCA_allv, size=50000, method="random", na.rm=T)
+
+
+# realizamos un kde multivariado con los 5 ejes
+kde <- kde(samp[, -5]) # implementa como maximo 4 ejes
+
+
+Kmax <- 15
+
+wss <- sapply(1:Kmax, function(k){
+  kmeans(samp, centers=k, nstart=50, iter.max=100)$tot.withinss
+})
 
 
 
-# calculo los dos ejes del NMDS - - - - - - - 
-nmds <- metaMDS(suit_std, distance = "bray", k = 3, trymax = 20) # consigo los dos ejes que me expresen mejor las imagenes
 
 
 
+plot(1:Kmax, wss, type="b", xlab="K", ylab="Within-cluster SS")
 
 
 
-# graficamos los resultados del NMDS -----
-resultados=as.data.frame(nmds$points)
-resultados$grupo=as.factor(grupo)
+### ultimo intento
+is_peak <- function(mat, i, j){
+  neigh <- mat[
+    max(1,i-1):min(nrow(mat),i+1),
+    max(1,j-1):min(ncol(mat),j+1)
+  ]
+  mat[i,j] == max(neigh)
+}
 
-p=ggplot(data=resultados, aes(x=MDS1, y=MDS2))+
-  geom_point(aes(color=grupo))+
-  geom_hex(fill = NA, bins = 30,aes(group=grupo,color=grupo))+
-  theme_classic()
+peak_idx <- which(
+  sapply(seq_len(length(z)), function(k){
+    i <- ((k-1) %% nrow(z)) + 1
+    j <- ((k-1) %/% nrow(z)) + 1
+    is_peak(z, i, j)
+  }) &
+    z > quantile(z, 0.85),   # filtra ruido
+  arr.ind = TRUE
+)
+
+centros <- cbind(
+  kde$x[peak_idx[,1]],
+  kde$y[peak_idx[,2]]
+)
+
+centros
+
+image(kde$x, kde$y, kde$z,
+      xlab="PC1", ylab="PC2")
+
+contour(kde$x, kde$y, kde$z, add=TRUE)
+
+points(centros[,1], centros[,2],
+       pch=19, cex=1.3)
+
+
+points(centros[,1], centros[,2],
+       pch=19, cex=1.2)
+
+# este funciono adecuadamente
+centros
+
+
+dist_fun <- function(x){
+  if(any(is.na(x))) return(NA)
   
-ggsave("D:/5. Tesis doctoral/3.- Results/Turnover/singularity between centers/nmds_richness.svg", plot = p, width = 18, height = 15, units = "cm")
+  d <- sqrt( (centros[,1] - x[1])^2 + 
+               (centros[,2] - x[2])^2 )
+  min(d)
+}
 
-plot(categorized)
+
+pc <- c(TT$PC1, TT$PC2)
+singularity <- app(pc, dist_fun)
+
+
+plot(singularity)
+## funcion que proyecta el Kde a el mapoa geografico
+
+kde_fun <- function(x){
+  
+  if(any(is.na(x))) return(NA)
+  
+  ix <- findInterval(x[1], kde$x)
+  iy <- findInterval(x[2], kde$y)
+  
+  ix <- pmax(pmin(ix, length(kde$x)), 1)
+  iy <- pmax(pmin(iy, length(kde$y)), 1)
+  
+  kde$z[ix, iy]
+}
+
+
+
+# voltear la escala pra que te de la inversa
+# de los valores
+
+kde_geo <- app(pc, kde_fun)
+
+plot(kde_geo)
+
+
+
+
+
+
+
+
+
+
+
+# una vez que ya tengo los cuatro centros puedo calcular la distancia 
+
+# encontrar los centros de cada una de las areas. 
+center <- global (PCA_allv$rasters, mean, na.rm=T)
+
+singularity <- app(pcs, function(x) {
+  sqrt(sum((x - center)^2))
+})### singularidad regional si en promedio la distancia al centro al que pertenece es mucho mas cercano o se parece mas a las otras areas.
+RGB[RGB < 0] <- 0
+RGB[RGB > 255] <- 255
+plotRGB(PCA.corte,r="PC"1, g="PC2", b="PC3")
+
+
+
+
 
 # Analisis de Permanova, para ver si son estadisticamente
 dist_bray <- vegdist(suit_std, method="bray")
